@@ -22,7 +22,7 @@ public:
 
 	}
 
-	bool 
+	bool is
 	
 };
 
