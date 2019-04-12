@@ -12,8 +12,6 @@
 
 using CryptoPP::Integer;
 
-#define dout std::cout << "\tdebug: "
-
 uint16_t hex2int(char c)
 {
     if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
@@ -114,12 +112,15 @@ class Timer
     std::unordered_map<std::string, clock_t> M;
     std::vector<std::string> stack;
     std::ostream& os;
+    static int counter;
 
     public:
     Timer(const std::string& name, std::ostream& os) : begin_all(clock()), name(name), os(os)
     {
         begin("all");
     }
+
+    Timer() : Timer("Timer #" + std::to_string(counter++), std::clog) {}
 
     void push(const std::string& s)
     {
@@ -151,27 +152,7 @@ class Timer
         end("all");
     }
 };
-
-// helper class to help predicting process times
-// only used for debbuging, has no actual effect
-class ProgressBar
-{
-    int num_of_stages;
-    clock_t begin;
-
-    public:
-    ProgressBar(int num_of_stages) : num_of_stages(num_of_stages), begin(clock())
-    {
-    }
-
-    double get_approximation(int stage)
-    {
-        double res = (clock() - begin) / CLOCKS_PER_SEC;
-        res *= num_of_stages;
-        res /= stage;
-        return res;
-    }
-};
+int Timer::counter = 1;
 
 class Intervals
 {
@@ -233,36 +214,23 @@ class Intervals
     }
 };
 
-template <typename T>
-T div_ceil(const T& n, const T& m)
+Integer div_ceil(const Integer& n, const Integer& m)
 {
-    T res = n / m;
+    Integer res = n / m;
     if (n % m == 0) return res;
     return res + 1;
 }
 
-/*
-template <typename T, typename F>
-void map_const(const std::vector<T>& vec, const F& f)
-{
-    dout;
-    for (const T& x : vec)
-        std::cout << std::boolalpha << f(x) << ", ";
-    std::cout << std::endl;
-}
-*/
-
-
-std::string BleichenbacherAttack(Server& srv, const Integer& c)
-{
+Integer BleichenbacherAttack(Server& srv, const Integer& c, std::ostream& out)
+{   
+    static int count = 1;
     // begin attack
-    Timer tick("Attack timer", std::cout);
+    Timer tick("Attack timer #" + std::to_string(count++), out);
     Integer n = srv.publicKey.GetModulus();
-    ProgressBar pb(n.BitCount());
 
     CryptoPP::ModularArithmetic ma(n);
     Integer B = Integer::Power2(n.BitCount() - 16);
-    Integer s = 0;
+    Integer s;
 
     // the current range ogf intervals we search in
     Intervals M;
@@ -273,36 +241,23 @@ std::string BleichenbacherAttack(Server& srv, const Integer& c)
     Integer min_size = size;
 
 
+    tick.push("step 2.a");
+    s = div_ceil(n,3*B);
+    while (s < n && !srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(s), c)))
+        s += 1;
+    tick.pop();
+
     for (int i = 1; M.size() > 1; ++i)
     {
-        size = M.size();
-        if (size.BitCount() < 100)
-            dout << "interval size = " << size << std::endl;
-        else
-            dout << "intervals size ~ 2^" << size.BitCount() << std::endl;
-
-        double left = pb.get_approximation(n.BitCount() - size.BitCount()) / 3600;
-        if (i != 1) dout << "estimated remainning running time: " << left << " hours" << std::endl;
-        if (size > min_size) throw std::runtime_error("algorithmic impossibility");
-
-        min_size = std::min(min_size, size);
-
-        if (i == 1 || M.count() > 1)
+        if (i != 1 && M.count() > 1)
         {
-            if (i == 1)
-                tick.push("step 2.a");
-            else
-                tick.push("step 2.b for i=" + std::to_string(i));
-
-            s = (i == 1) ? div_ceil(n, 3 * B) : s + 1;
+            tick.push("step 2.b for i=" + std::to_string(i));
+            s += 1;
             while (s < n && !srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(s), c)))
                 s += 1;
-
             tick.pop();
-            if (s >= n) throw std::runtime_error("algorithmic impossibility");
         }
-
-        else
+        else if(i != 1)
         {
             tick.push("step 2.c for i=" + std::to_string(i));
             Integer a = M.front().first, b = M.front().second;
@@ -322,7 +277,7 @@ std::string BleichenbacherAttack(Server& srv, const Integer& c)
             }
             tick.pop();
         }
-
+        
         if (s <= 0 || s >= n) throw std::runtime_error("algorithmic impossibility");
 
         tick.push("step 3 for i=" + std::to_string(i));
@@ -341,30 +296,23 @@ std::string BleichenbacherAttack(Server& srv, const Integer& c)
         M_res.sort();
         M = M_res;
         tick.pop();
+
+        size = M.size();   
+        if (size > min_size) throw std::runtime_error("algorithmic impossibility");
+        min_size = std::min(min_size, size);
     }
 
-    dout << "done! interval size = " << M.size() << std::endl;
-
-    return PkcsDecode(M.front().first, srv.keysize);
+    if (M.size() != 1) throw std::runtime_error("algorithmic impossibility");
+    
+    return M.front().first,;
 }
-
 
 int main(int argc, char* argv[])
 {
     Server srv(2048);
-    Integer c = srv.PkcsEncrypt("hello world!");
-    std::string attack_res = "wasn't found";
-
-    try
-    {
-        attack_res = BleichenbacherAttack(srv, c);
-    }
-    catch (const std::exception& e)
-    {
-        dout << e.what() << std::endl;
-    }
-
-    std::cout << attack_res << std::endl;
+    Integer c = srv.PkcsEncrypt("hello world! my name is ofer! this is my secret");
+    Integer attack_res = BleichenbacherAttack(srv, c, std::cout);
+    std::cout << PkcsDecode(attack_res,srv.keysize) << std::endl;
 
     return 0;
 }
