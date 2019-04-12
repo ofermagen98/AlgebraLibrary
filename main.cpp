@@ -3,6 +3,7 @@
 #include <cryptopp/osrng.h>
 #include <cryptopp/rsa.h>
 
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <set>
@@ -19,12 +20,9 @@ uint16_t hex2int(char c)
     if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
     if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
     if (c >= '0' && c <= '9') return c - '0';
-    throw "wtf";
+    throw std::range_error(
+    "hexadecimal chars must be in the range \"A\"-\"F\", \"a\"-\"f\" or \"0\"-\"9\"");
 }
-
-
-const int keysize = 256; // keysize is 3072 bits
-
 
 class Server
 {
@@ -36,9 +34,9 @@ class Server
     CryptoPP::RSA::PublicKey publicKey;
     std::string PS;
 
-    Server()
+    Server(int keysize)
     {
-        privateKey.GenerateRandomWithKeySize(prng, keysize * 8);
+        privateKey.GenerateRandomWithKeySize(prng, keysize);
         publicKey = CryptoPP::RSA::PublicKey(privateKey);
     }
 
@@ -61,10 +59,13 @@ class Server
     }
 };
 
-Integer PkcsEncode(const std::string& s)
+Integer PkcsEncrypt(Server& srv, const std::string& s)
 {
-    int pad = keysize - 3 - s.length();
-    if (pad < 8) throw "wtf";
+    int max_size = srv.publicKey.GetModulus().ByteCount() - 11;
+    if (s.length() > max_size)
+        throw std::overflow_error("message too long, max size is " + std::to_string(max_size));
+
+    int pad = srv.publicKey.GetModulus().ByteCount() - 3 - s.length();
     uint16_t rnd;
 
     std::stringstream ss;
@@ -86,7 +87,7 @@ Integer PkcsEncode(const std::string& s)
         ss << std::hex << c;
     }
 
-    return Integer(ss.str().c_str());
+    return srv.publicKey.ApplyFunction(Integer(ss.str().c_str()));
 }
 
 std::string PkcsDecode(const Integer& m)
@@ -98,12 +99,14 @@ std::string PkcsDecode(const Integer& m)
     _s << std::hex << m;
     s = _s.str();
     s.pop_back();
-    if (s.length() <= 2 * 10 || s.length() % 2 == 0) throw "wtf";
+    if (s.length() <= 2 * 10) throw std::invalid_argument("message length is too short");
+    if (s.length() % 2 == 0) throw std::invalid_argument("message length is even, must be odd");
 
     int begin = 1;
     while (begin < s.length() && (s[begin] != '0' || s[begin + 1] != '0'))
         begin += 2;
-    if (begin >= s.length()) throw "wtf";
+
+    if (begin >= s.length()) return "";
 
     std::string res((s.length() - begin) / 2, '0');
     for (int i = begin; i < s.length(); i += 2)
@@ -112,8 +115,8 @@ std::string PkcsDecode(const Integer& m)
     return res;
 }
 
-//helper class to help messuring times of the attack
-//only used fo rdebbuging, has no actual effect
+// helper class to help messuring times
+// only used for debbuging, has no actual effect
 class Timer
 {
     private:
@@ -160,21 +163,20 @@ class Timer
     }
 };
 
-//helper class to help handling the concept of a set of disjoint intervals
+// helper class to help handling the concept of a set of disjoint intervals
 class Intervals
 {
     typedef std::pair<Integer, Integer> II;
     std::set<II> intervals;
 
     public:
-
-    //returns the intervals themself (as a const set)
+    // returns the intervals themself (as a const set)
     const std::set<II>& get_intervals() const
     {
         return intervals;
     }
-    //returns the sum of sizes of intervals
-    //i.e the number of elemnts that belungs to some interval
+    // returns the sum of sizes of intervals
+    // i.e the number of elemnts that belungs to some interval
     Integer size() const
     {
         Integer res = 0;
@@ -183,13 +185,13 @@ class Intervals
         return res;
     }
 
-    //returns the number of disjoint intervals
+    // returns the number of disjoint intervals
     int count() const
     {
         return intervals.size();
     }
 
-    //inserts an interval to the set
+    // inserts an interval to the set
     void insert(II p)
     {
         auto it = intervals.begin();
@@ -218,30 +220,34 @@ T div_ceil(const T& n, const T& m)
     if (n % m == 0) return res;
     return res + 1;
 }
-int main(int argc, char* argv[])
+
+
+std::string BleichenbacherAttack(Server& srv, const Integer& c)
 {
-
-    Server srv;
-    Integer m_secret = PkcsEncode("hell0");
-    Integer c0 = srv.publicKey.ApplyFunction(m_secret);
-
     // begin attack
     Timer tick("Attack timer", std::cout);
     Integer n = srv.publicKey.GetModulus();
     CryptoPP::ModularArithmetic ma(n);
-    Integer B = Integer::Power2(8 * (keysize - 2));
-    Intervals M;
+    Integer B = Integer::Power2(n.BitCount() - 16);
+
     Integer s = -1;
+
+    // the current range ogf intervals we search in
+    Intervals M;
     M.insert(std::make_pair(2 * B, 3 * B - 1));
-    Integer last, sz;
+    // the current interval size
+    Integer size = M.size();
+    // the best interval size so far
+    Integer min_size = size;
+
     for (int i = 1; M.size() > 1; ++i)
     {
         if (i > 1)
         {
-            sz = M.size();
-            if (sz.BitCount() < 100) dout << "interval size: " << std::hex << sz << std::endl;
-            dout << "size decreased? " << std::boolalpha << (sz < last) << std::endl;
-            last = sz;
+            size = M.size();
+            if (size.BitCount() < 100) dout << "interval size: " << std::hex << size << std::endl;
+            dout << "size decreased? " << std::boolalpha << (size < min_size) << std::endl;
+            min_size = std::min(min_size, size);
         }
 
         if (i == 1 || M.count() > 1)
@@ -252,7 +258,7 @@ int main(int argc, char* argv[])
                 tick.push("step 2.b for i=" + std::to_string(i));
 
             s = (i == 1) ? div_ceil(n, 3 * B) : s + 1;
-            while (!srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(s), c0)))
+            while (!srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(s), c)))
                 s += 1;
 
             tick.pop();
@@ -268,7 +274,7 @@ int main(int argc, char* argv[])
                 Integer begin = div_ceil(2 * B + r * n, b), end = div_ceil(3 * B + r * n, a) - 1;
                 for (Integer st = begin; !stop_flag && st <= end; ++st)
                 {
-                    if (srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(st), c0)))
+                    if (srv.isPkcsConforming(ma.Multiply(srv.publicKey.ApplyFunction(st), c)))
                     {
                         stop_flag = true;
                         s = st;
@@ -293,11 +299,16 @@ int main(int argc, char* argv[])
         tick.pop();
     }
 
-    Integer m = M.get_intervals().begin()->first;
-    std::string result = PkcsDecode(m);
+    return PkcsDecode(M.get_intervals().begin()->first);
+}
 
-    std::cout << result << std::endl;
 
+int main(int argc, char* argv[])
+{
+    Server srv(2048);
+    Integer c = PkcsEncrypt(srv, "hell0");
+    auto attack_res = BleichenbacherAttack(srv, c);
+    std::cout << attack_res << std::endl;
 
     return 0;
 }
