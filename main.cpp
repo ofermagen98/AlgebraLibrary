@@ -4,9 +4,10 @@
 #include <cryptopp/rsa.h>
 
 #include <exception>
+#include <fstream>
+#include <sstream>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <unordered_map>
 #include <vector>
 
@@ -15,7 +16,6 @@ using CryptoPP::Integer;
 class Server
 {
     private:
-    int message_counter = 0;
     CryptoPP::RSA::PrivateKey privateKey;
     CryptoPP::AutoSeededRandomPool prng;
 
@@ -23,13 +23,6 @@ class Server
     const int keysize;
     CryptoPP::RSA::PublicKey publicKey;
     std::string PS;
-
-    void set_message_counter(int x){
-        message_counter = x;
-    }
-    int get_message_counter() const {
-        return message_counter;
-    }
 
     Server(int keysize) : keysize(keysize)
     {
@@ -39,7 +32,6 @@ class Server
 
     bool isPkcsConforming(const Integer& c)
     {
-        ++message_counter;
         Integer m = privateKey.CalculateInverse(prng, c);
         if (m.BitCount() != keysize - 14) return false;
         int sz = m.ByteCount();
@@ -85,60 +77,44 @@ class Server
 
 // helper class to help messuring times
 // only used for debbuging, has no actual effect
-class Timer
+class ProgressBar
 {
-    private:
-    std::string name;
-    const clock_t begin_all;
-
-
-    std::unordered_map<std::string, clock_t> M;
-    std::vector<std::string> stack;
+    int guess;
+    const std::string name;
+    const clock_t begin;
     std::ostream& os;
-    static int counter;
+    int counter = 0, last = -1;
 
     public:
-    Timer(const std::string& name, std::ostream& os) : begin_all(clock()), name(name), os(os)
-    {
-        os << "Begining \"" << name << "\"" << std::endl;
-    }
-
-    Timer() : Timer("Timer #" + std::to_string(counter++), std::clog)
+    ProgressBar(const std::string& name, int guess, std::ostream& os)
+    : name(name), guess(guess), os(os), begin(clock())
     {
     }
 
-    void push(const std::string& s)
+    int get_counter() const
     {
-        begin(s);
-        stack.push_back(s);
+        return counter;
     }
 
-    void pop()
+    void advance()
     {
-        end(stack.back());
-        stack.pop_back();
-    }
+        counter++;
+        int per = (counter * 100) / guess;
+        if (per <= last) return;
+        last = per;
 
-    void begin(const std::string& s)
-    {
-        M[s] = clock();
-    }
-
-    void end(const std::string& s)
-    {
-        double secs = double(clock() - M[s]) / CLOCKS_PER_SEC;
-        if (secs > 1e-2)
-            os << name << ": finised " << s << ", took " << secs << " seconds" << std::endl;
-        M.erase(s);
-    }
-
-    ~Timer()
-    {
-        double secs = double(clock() - begin_all) / CLOCKS_PER_SEC;
-        os << "\"" << name << "\" finished, took " << secs << " seconds" << std::endl;
+        os << name << ": " << per << "%";
+        
+        if (per >= 10 && counter < guess)
+        {
+            double remain = clock() - begin;
+            remain /= CLOCKS_PER_SEC;
+            remain *= 1 - double(counter) / guess;
+            os << " remaining time " << remain << " seconds";
+        }
+        os << std::endl;
     }
 };
-int Timer::counter = 1;
 
 class Intervals
 {
@@ -146,7 +122,7 @@ class Intervals
     typedef std::pair<Integer, Integer> II;
     std::vector<II> arr;
 
-    //turn the set of non-disjoint intervals in "arr" to a set of disjoint intervals
+    // turn the set of non-disjoint intervals in "arr" to a set of disjoint intervals
     void sort()
     {
         std::sort(arr.begin(), arr.end(),
@@ -174,7 +150,7 @@ class Intervals
             arr.pop_back();
     }
 
-    //returns the first element
+    // returns the first element
     II& front()
     {
         return arr.front();
@@ -195,8 +171,8 @@ class Intervals
     {
         return arr.size();
     }
-    
-    //inserts an elment to the set of intervals
+
+    // inserts an elment to the set of intervals
     void insert(const Integer& a, const Integer& b)
     {
         arr.push_back(std::make_pair(a, b));
@@ -230,9 +206,11 @@ std::string PkcsDecode(const Integer& m, int keysize)
 
 Integer BleichenbacherAttack(Server& srv, const Integer& c, std::ostream& out)
 {
-    static int count = 1;
-    // begin attack timer
-    Timer tick("Attack timer #" + std::to_string(count++), out);
+    static int attack_count = 1;
+    int keysize = srv.publicKey.GetModulus().BitCount();
+    std::stringstream ss;
+    ProgressBar pb("Attack progress bar #" + std::to_string(attack_count++), 15*keysize, ss);
+
     // basic variables
     Integer n = srv.publicKey.GetModulus();
     CryptoPP::ModularArithmetic modN = n;
@@ -246,28 +224,31 @@ Integer BleichenbacherAttack(Server& srv, const Integer& c, std::ostream& out)
     M.insert(2 * B, 3 * B - 1);
 
     // step 2.a
-    tick.push("step 2.a");
     s = div_ceil(n, 3 * B);
     while (s < n && !srv.isPkcsConforming(modN.Multiply(srv.publicKey.ApplyFunction(s), c)))
+    {
         s += 1;
-    tick.pop();
+        pb.advance();
+    }
+    pb.advance();
 
     for (int i = 1; M.size() > 1; ++i)
     {
         // step 2.b
         if (i != 1 && M.count() > 1)
         {
-            tick.push("step 2.b for i=" + std::to_string(i));
             s += 1;
             while (s < n && !srv.isPkcsConforming(modN.Multiply(srv.publicKey.ApplyFunction(s), c)))
+            {
                 s += 1;
-            tick.pop();
+                pb.advance();
+            }
+            pb.advance();
         }
 
         // step 2.c
         else if (i != 1)
         {
-            tick.push("step 2.c for i=" + std::to_string(i));
             Integer a = M.front().first, b = M.front().second;
             bool stop_flag = false;
             for (Integer r = div_ceil(2 * b * s - 4 * B, n); !stop_flag; ++r)
@@ -281,13 +262,12 @@ Integer BleichenbacherAttack(Server& srv, const Integer& c, std::ostream& out)
                         s = st;
                         break;
                     }
+                    pb.advance();
                 }
             }
-            tick.pop();
         }
 
         // step 3
-        tick.push("step 3 for i=" + std::to_string(i));
         Intervals M_res;
         for (const auto& p : M.arr)
         {
@@ -302,24 +282,30 @@ Integer BleichenbacherAttack(Server& srv, const Integer& c, std::ostream& out)
         }
         M_res.sort();
         M = M_res;
-        tick.pop();
     }
-
+    out << pb.get_counter();
     if (M.size() != 1) throw std::runtime_error("algorithmic impossibility");
     return M.front().first;
 }
 
 int main(int argc, char* argv[])
 {
-    Server srv(2048);
-    srv.set_message_counter(0);
-    Integer c = srv.PkcsEncrypt("hello world! my name is ofer! this is my secret");
+    std::ofstream log_file, data_file;
+    log_file.open("log.txt");
+    log_file << "index, keysize, messages" << std::endl;
 
-    Integer attack_res = BleichenbacherAttack(srv, c, std::cout);
+    for (int i = 1; i < (1 << 20); ++i)
+    {
+        int keysize = rand() % (384 - 128) + 128;
+        keysize *= 8;
+        Server srv(keysize);
 
-    std::cout << PkcsDecode(attack_res, srv.keysize) << std::endl;
-    
-    std::cout << "Total number of messages sent: " << srv.get_message_counter() << std::endl;
-
+        Integer c = srv.PkcsEncrypt("hello world! my name is ofer! this is my secret");
+        log_file << i << "," << keysize << ",";
+        Integer attack_res = BleichenbacherAttack(srv, c, log_file);
+        log_file << std::endl;
+    }
+    data_file.close();
+    log_file.close();
     return 0;
 }
