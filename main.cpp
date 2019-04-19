@@ -2,25 +2,25 @@
 #include <cryptopp/modarith.h>
 #include <cryptopp/osrng.h>
 #include <cryptopp/rsa.h>
+using CryptoPP::Integer;
+
+#include <fstream>
+#include <iostream>
 
 #include <exception>
-#include <fstream>
-#include <sstream>
 
-#include <iomanip>
-#include <iostream>
-#include <mutex>
-#include <thread>
 #include <unordered_map>
 #include <vector>
 
-using CryptoPP::Integer;
+#include <ctime>
+#include <mutex>
+#include <thread>
+using std::chrono::steady_clock;
 
 class Server
 {
     private:
     CryptoPP::RSA::PrivateKey privateKey;
-    CryptoPP::AutoSeededRandomPool prng;
 
     public:
     int keysize;
@@ -28,6 +28,7 @@ class Server
 
     Server(int keysize) : keysize(keysize)
     {
+        CryptoPP::AutoSeededRandomPool prng;
         privateKey.GenerateRandomWithKeySize(prng, keysize);
         publicKey = CryptoPP::RSA::PublicKey(privateKey);
     }
@@ -45,21 +46,21 @@ class Server
         return *this;
     }
 
-    bool is_pkcs_conforming(const Integer& c)
+    bool is_pkcs_conforming(const Integer& c) const
     {
+        CryptoPP::AutoSeededRandomPool prng;
         Integer m = privateKey.CalculateInverse(prng, c);
-        if (m.BitCount() != keysize - 14) return false;
         int sz = m.ByteCount();
-
+        if (sz * 8 != keysize - 8) return false;
         if (m.GetByte(sz - 1) != 2) return false;
-        for (int i = 0; i < 8; ++i)
-            if (m.GetByte(sz - 2 - i) == 0) return false;
+        for (int i = sz - 2; i > sz - 10; --i)
+            if (m.GetByte(i) == 0) return false;
         for (int i = sz - 10; i >= 0; --i)
             if (m.GetByte(i) == 0) return true;
         return false;
     }
 
-    Integer pkcs_encrypt(const std::string& s)
+    Integer pkcs_encrypt(const std::string& s) const
     {
         int max_size = publicKey.GetModulus().ByteCount() - 11;
         if (s.length() > max_size)
@@ -85,131 +86,36 @@ class Server
             res.SetByte((sz - 4 - pad) - i, s[i]);
 
         res.SetByte(sz - 1, 0);
-
         return publicKey.ApplyFunction(res);
     }
 };
 
 // helper class to help messuring times
 // only used for debbuging, has no actual effect
-class Timer
+class Logger
 {
-    private:
-    std::string name;
-    static int counter;
-    const clock_t begin_all;
-
-
-    std::unordered_map<std::string, clock_t> M;
-    std::vector<std::string> stack;
+    std::string name = "";
     std::ostream& os;
 
     public:
-    Timer(const std::string& name, std::ostream& os) : begin_all(clock()), name(name), os(os)
+    Logger(std::ostream& os) : os(os)
     {
+    }
+
+    void set_name(const std::string& s)
+    {
+        name = s;
         os << "Begining \"" << name << "\"" << std::endl;
     }
 
-    Timer() : Timer("Timer #" + std::to_string(counter++), std::clog)
+    std::ostream& debug(int t = 0)
     {
-    }
-
-    void push(const std::string& s, bool force_print = false)
-    {
-        begin(s, force_print);
-        stack.push_back(s);
-    }
-
-    void pop()
-    {
-        end(stack.back());
-        stack.pop_back();
-    }
-
-    void begin(const std::string& s, bool force_print = false)
-    {
-        M[s] = clock();
-        if (force_print) os << name << ": began " << s << std::endl;
-    }
-
-    void end(const std::string& s)
-    {
-        double secs = double(clock() - M[s]) / CLOCKS_PER_SEC;
-        if (secs > 6e-2)
-            os << name << ": finised " << s << ", took " << secs << " seconds" << std::endl;
-        M.erase(s);
-    }
-
-    ~Timer()
-    {
-        double secs = double(clock() - begin_all) / CLOCKS_PER_SEC;
-        os << "\"" << name << "\" finished, took " << secs << " seconds" << std::endl;
+        for (int i = 0; i < t; ++i)
+            os << "\t";
+        return os << name << " debug: ";
     }
 };
-int Timer::counter = 1;
 
-class Intervals
-{
-    public:
-    typedef std::pair<Integer, Integer> II;
-    std::vector<II> arr;
-
-    // turn the set of non-disjoint intervals in "arr" to a set of disjoint intervals
-    void sort()
-    {
-        std::sort(arr.begin(), arr.end(),
-                  [](const II& i1, const II& i2) { return i1.first > i2.first; });
-
-        int index = 0;
-        for (int i = 0; i < arr.size(); ++i)
-        {
-            if (index != 0 && arr[index - 1].first <= arr[i].second)
-            {
-                while (index != 0 && arr[index - 1].first <= arr[i].second)
-                {
-                    arr[index - 1].second = std::max(arr[index - 1].second, arr[i].second);
-                    arr[index - 1].first = std::min(arr[index - 1].first, arr[i].first);
-                    --index;
-                }
-            }
-            else
-                arr[index] = arr[i];
-
-            ++index;
-        }
-
-        while (arr.size() > index)
-            arr.pop_back();
-    }
-
-    // returns the first element
-    II& front()
-    {
-        return arr.front();
-    }
-
-    // returns the sum of sizes of intervals
-    // i.e the number of integers that belongs to some interval
-    Integer size() const
-    {
-        Integer res = 0;
-        for (const II& p : arr)
-            res += p.second - p.first + 1;
-        return res;
-    }
-
-    // returns the number of disjoint intervals
-    int count() const
-    {
-        return arr.size();
-    }
-
-    // inserts an elment to the set of intervals
-    void insert(const Integer& a, const Integer& b)
-    {
-        arr.push_back(std::make_pair(a, b));
-    }
-};
 
 Integer div_ceil(const Integer& n, const Integer& m)
 {
@@ -236,144 +142,254 @@ std::string pkcs_decode(const Integer& m, int keysize)
     return res.data();
 }
 
-namespace parallel_search
-{
-Integer s;
-std::mutex lock, glb_lock;
-bool run_flag;
-const int THREAD_NUM = 4;
 
-void thread_search(Server srv, Integer c, Integer begin, int offset)
+class Attacker
 {
-    Integer n = srv.publicKey.GetModulus();
-    CryptoPP::ModularArithmetic modN = n;
-    for (Integer i = begin; parallel_search::run_flag && i < n; i += offset)
+
+    // static id counter for all attackers
+    static int id;
+    static std::mutex id_mutex;
+    // limitat number of messages each attacker can send
+    const static int limitation = 20000;
+    // counts the number of message this attacker sent
+    int message_counter;
+    const Server& srv;
+    const Integer& c;
+    const std::atomic_bool* const pkill;
+    std::string name;
+
+    protected:
+    Logger clog;
+    const Integer n, B;
+
+    inline bool is_good_pivot(const Integer& s)
     {
-        if (srv.is_pkcs_conforming(modN.Multiply(srv.publicKey.ApplyFunction(i), c)))
-        {
-            parallel_search::lock.lock();
-            if (parallel_search::run_flag)
-            {
-                parallel_search::s = i;
-                parallel_search::run_flag = false;
-            }
-            parallel_search::lock.unlock();
-        }
+        ++message_counter;
+        if (message_counter > limitation)
+            throw std::runtime_error("message limitation was reached");
+        return srv.is_pkcs_conforming(srv.publicKey.ApplyFunction(s).Times(c).Modulo(srv.publicKey.GetModulus()));
     }
-}
 
-Integer parallel_search(const Server& srv, const Integer& c, const Integer& begin, int threadnum = parallel_search::THREAD_NUM)
-{
-    parallel_search::glb_lock.lock();
-    parallel_search::run_flag = true;
-    std::vector<std::thread> run_threads;
-
-
-    for (int i = 1; i < threadnum; ++i)
-        run_threads.push_back(std::thread(thread_search, srv, c, begin + i, threadnum));
-    thread_search(srv, c, begin, threadnum);
-
-    for (std::thread& th : run_threads)
-        if (th.joinable()) th.join();
-
-    Integer res = parallel_search::s;
-    parallel_search::glb_lock.unlock();
-    return res;
-}
-} // namespace parallel_search
-
-
-Integer bleichenbacher_attack(Server& srv, const Integer& c)
-{
-    static int attack_count = 1;
-    Timer tick("Attack timer #" + std::to_string(attack_count++), std::clog);
-
-    int keysize = srv.publicKey.GetModulus().BitCount();
-    // basic variables
-    Integer n = srv.publicKey.GetModulus();
-    CryptoPP::ModularArithmetic modN = n;
-    Integer B = Integer::Power2(keysize - 16);
-    Integer s;
-    // the current range of intervals we search in
-    Intervals M;
-
-    // algorithm
-    // step 1 is skipped (since c is PCKS#1 conforming)
-    M.insert(2 * B, 3 * B - 1);
-
-    // step 2.a
-    tick.push("step 2.a", true);
-    s = parallel_search::parallel_search(srv, c, div_ceil(n, 3 * B));
-    tick.pop();
-
-    for (int i = 1; M.size() > 1; ++i)
+    inline bool not_killed() const
     {
-        // step 2.b
-        if (i != 1 && M.count() > 1)
-        {
-            tick.push("step 2.b for i=" + std::to_string(i), true);
-            s = parallel_search::parallel_search(srv, c, s + 1);
-            tick.pop();
-        }
+        return pkill == nullptr || !*pkill;
+    }
 
-        // step 2.c
-        else if (i != 1)
+    public:
+    Attacker(const Server& srv, const Integer& c, const std::string& name, const std::atomic_bool* pkill)
+    : pkill(pkill), clog(std::clog), srv(srv), n(srv.publicKey.GetModulus()),
+      B(Integer::Power2(n.BitCount() - 16)), c(c), name(name)
+    {
+    }
+
+    std::ostream& debug(int t = 0)
+    {
+        return clog.debug(t);
+    }
+
+    void reset()
+    {
+        std::lock_guard<std::mutex> lock(Attacker::id_mutex);
+        clog.set_name(name + " (" + std::to_string(id++) + ")");
+        message_counter = 0;
+    }
+};
+int Attacker::id = 1;
+std::mutex Attacker::id_mutex;
+
+
+class BleichenbacherAttacker : public Attacker
+{
+    class Intervals
+    {
+        public:
+        typedef std::pair<Integer, Integer> II;
+        std::vector<II> arr;
+
+        // turn the set of non-disjoint intervals in "arr" to a set of disjoint intervals
+        void sort()
         {
-            tick.push("step 2.c for i=" + std::to_string(i));
-            Integer a = M.front().first, b = M.front().second;
-            bool stop_flag = false;
-            for (Integer r = div_ceil(2 * b * s - 4 * B, n); !stop_flag; ++r)
+            std::sort(arr.begin(), arr.end(),
+                      [](const II& i1, const II& i2) { return i1.first > i2.first; });
+
+            int index = 0;
+            for (int i = 0; i < arr.size(); ++i)
             {
-                Integer begin = div_ceil(2 * B + r * n, b), end = div_ceil(3 * B + r * n, a) - 1;
-                for (Integer st = begin; !stop_flag && st <= end; ++st)
+                if (index != 0 && arr[index - 1].first <= arr[i].second)
                 {
-                    if (srv.is_pkcs_conforming(modN.Multiply(srv.publicKey.ApplyFunction(st), c)))
+                    while (index != 0 && arr[index - 1].first <= arr[i].second)
                     {
-                        stop_flag = true;
-                        s = st;
-                        break;
+                        arr[index - 1].second = std::max(arr[index - 1].second, arr[i].second);
+                        arr[index - 1].first = std::min(arr[index - 1].first, arr[i].first);
+                        --index;
                     }
                 }
+                else
+                    arr[index] = arr[i];
+
+                ++index;
             }
-            tick.pop();
+
+            while (arr.size() > index)
+                arr.pop_back();
         }
 
-        // step 3
-        tick.push("step 3 for i=" + std::to_string(i));
-        Intervals M_res;
+        // returns the first element
+        II& front()
+        {
+            return arr.front();
+        }
+
+        const II& front() const
+        {
+            return arr.front();
+        }
+
+        II enclose() const
+        {
+            II res = front();
+            for (const II& p : arr)
+            {
+                if (p.first < res.first) res.first = p.first;
+                if (p.second > res.second) res.second = p.second;
+            }
+            return res;
+        }
+
+        // returns the sum of sizes of intervals
+        // i.e the number of integers that belongs to some interval
+        Integer size() const
+        {
+            Integer res = 0;
+            for (const II& p : arr)
+                res += p.second - p.first + 1;
+            return res;
+        }
+
+        // returns the number of disjoint intervals
+        int count() const
+        {
+            return arr.size();
+        }
+
+        // inserts an elment to the set of intervals
+        void insert(const Integer& a, const Integer& b)
+        {
+            arr.push_back(std::make_pair(std::move(a), std::move(b)));
+        }
+    };
+
+    Intervals M;
+
+    BleichenbacherAttacker(const Server& srv, const Integer& c, std::atomic_bool* pkill = nullptr)
+    : Attacker(srv, c, "Bleichenbacher Attacker", pkill)
+    {
+        M.insert(2 * B, 3 * B - 1);
+    }
+
+    // step 3
+    void interval_divsion(const Integer& s)
+    {
+        Intervals res;
         for (const auto& p : M.arr)
         {
-            Integer a = p.first, b = p.second;
+            const Integer& a = p.first;
+            const Integer& b = p.second;
             Integer begin = div_ceil(a * s - 3 * B + 1, n), end = (b * s - 2 * B) / n;
             for (Integer r = begin; r <= end; ++r)
             {
                 Integer na = std::max(a, div_ceil(2 * B + r * n, s)),
                         nb = std::min(b, (3 * B - 1 + r * n) / s);
-                M_res.insert(na, nb);
+                res.insert(std::move(na), std::move(nb));
             }
         }
-        M_res.sort();
-        M = M_res;
-        tick.pop();
+        res.sort();
+        M = res;
     }
 
-    if (M.size() != 1) throw std::runtime_error("algorithmic impossibility");
-    return M.front().first;
-}
+    // step 2.c
+    void repivot(Integer& s, const Intervals::II& range)
+    {
+        const Integer& a = range.first;
+        const Integer& b = range.second;
+        for (Integer r = div_ceil(2 * b * s - 4 * B, n);; ++r)
+            for (s = div_ceil(2 * B + r * n, b); s < div_ceil(3 * B + r * n, a); ++s)
+                if (is_good_pivot(s)) return;
+    }
 
+    // step 2.a
+    // step 2.b
+    void incremental_search(Integer& s)
+    {
+        while (!is_good_pivot(s))
+        {
+            ++s;
+        }
+    }
+};
+
+class BlindingAttacker : public Attacker
+{
+
+    public:
+    BlindingAttacker(const Server& srv, const Integer& c, const std::atomic_bool* pkill = nullptr)
+    : Attacker(srv, c, "Blinding Attacker", pkill)
+    {
+    }
+
+    Integer blind()
+    {
+        Integer s = 0;
+        CryptoPP::AutoSeededRandomPool prng;
+        do
+        {
+            s.Randomize(prng, 2, n - 1);
+        } while (!is_good_pivot(s) && not_killed());
+        return s;
+    }
+};
+
+std::vector<Integer> res_vector;
+std::atomic_bool thread_kill_flag;
+std::mutex res_vector_mutex;
+const int blindings_num = 5;
+void blinding_thread(const Server* srv, const Integer* c)
+{
+    BlindingAttacker attacker(*srv, *c, &thread_kill_flag);
+    Integer blind_value;
+
+    while (!thread_kill_flag)
+    {
+        attacker.reset();
+        try
+        {
+            blind_value = attacker.blind();
+            if (thread_kill_flag) break;
+            attacker.debug(1) << "found blinding value!" << std::endl;
+            {
+                std::lock_guard<std::mutex> lock(res_vector_mutex);
+                res_vector.push_back(blind_value);
+                std::clog << "Number of blindings found " << res_vector.size() << std::endl;
+                if (res_vector.size() >= blindings_num) thread_kill_flag = true;
+            }
+        }
+        catch (std::exception& e)
+        {
+            attacker.debug(1) << "was killed before it found blinding value" << std::endl;
+        }
+    }
+}
 
 int main(int argc, char* argv[])
 {
-    int keysize = rand() % (512 - 128) + 128;
-    keysize *= 8;
-    Server srv(keysize);
-
-    Integer c = srv.pkcs_encrypt("hello world! my name is ofer! this is my secret");
-    Integer res = bleichenbacher_attack(srv, c);
-    std::string message = pkcs_decode(res, srv.keysize);
-
-    std::cout << message << std::endl;
-
-
+    Server srv(2048);
+    Integer c = srv.pkcs_encrypt("He11o w0r1d! My n4me is 0fer! This is my secret");
+    thread_kill_flag = false;
+    std::vector<std::thread> v;
+    for (int i = 0; i < 3; ++i)
+        v.push_back(std::move(std::thread(blinding_thread, &srv, &c)));
+    blinding_thread(&srv, &c);
+    for (auto& t : v)
+        if (t.joinable()) t.join();
     return 0;
 }
