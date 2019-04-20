@@ -6,9 +6,15 @@ using CryptoPP::Integer;
 
 #include <exception>
 #include <iostream>
+#include <fstream>
 #include <mutex>
 #include <thread>
+#include <chrono>
 #include <vector>
+
+const int max_message_count = 5000;
+
+typedef std::pair<Integer, Integer> II;
 
 inline Integer div_ceil(const Integer& x, const Integer& y)
 {
@@ -121,7 +127,7 @@ class Attacker
     // static id counter mutex
     static std::mutex id_mutex;
     // limitat number of messages each attacker can send
-    const static int limitation = 20000;
+    const int limitation = 200000;
     // counts the number of message this attacker sent
     int message_counter;
     const Server& srv;
@@ -136,14 +142,14 @@ class Attacker
     inline bool is_good_pivot(const Integer& s)
     {
         ++message_counter;
-        if (message_counter > limitation)
+        if (limitation > 0 && message_counter > limitation)
             throw std::runtime_error("message limitation was reached");
         return srv.is_pkcs_conforming(srv.publicKey.ApplyFunction(s).Times(c).Modulo(n));
     }
 
     public:
-    Attacker(const Server& srv, const Integer& c, const std::string& base_name)
-    : clog(std::clog), srv(srv), n(srv.publicKey.GetModulus()),
+    Attacker(const Server& srv, const Integer& c, const std::string& base_name, int limitation = max_message_count)
+    : limitation(limitation), clog(std::clog), srv(srv), n(srv.publicKey.GetModulus()),
       B(Integer::Power2(srv.publicKey.GetModulus().BitCount() - 16)), c(c), base_name(base_name)
     {
     }
@@ -157,6 +163,7 @@ class Attacker
         return clog.debug(t);
     }
 
+
     void reset()
     {
         std::lock_guard<std::mutex> lock(Attacker::id_mutex);
@@ -165,9 +172,9 @@ class Attacker
         debug() << "Beginning" << std::endl;
     }
 
-    static std::string pkcs_decode(const Integer& m, int keysize)
+    std::string pkcs_decode(const Integer& m)
     {
-        if (m.BitCount() != keysize - 14) throw std::invalid_argument("invalid message length");
+        if (m.BitCount() != n.BitCount() - 14) throw std::invalid_argument("invalid message length");
         std::vector<char> res;
         uint16_t c;
 
@@ -186,14 +193,40 @@ class Attacker
 int Attacker::id = 1;
 std::mutex Attacker::id_mutex;
 
+class BlindingAttacker : public Attacker
+{
+    const std::atomic_bool* pkill;
+
+    public:
+    BlindingAttacker(const Server& srv, const Integer& c, const std::atomic_bool* pkill = nullptr)
+    : Attacker(srv, c, "Blinding Attacker"), pkill(pkill)
+    {
+    }
+
+    inline bool not_killed() const
+    {
+        return (pkill == nullptr || !*pkill);
+    }
+
+    Integer blind()
+    {
+        Integer s = 0;
+        CryptoPP::AutoSeededRandomPool prng;
+        do
+        {
+            s.Randomize(prng, 2, n / 2);
+        } while (!is_good_pivot(s) && not_killed());
+        return s;
+    }
+};
+
 class RangeAttacker : public Attacker
 {
     class Intervals
     {
         public:
-        typedef std::pair<Integer, Integer> II;
         std::vector<II> arr;
-
+       
         // turn the set of non-disjoint intervals in "arr" to a set of disjoint intervals
         void sort()
         {
@@ -268,14 +301,40 @@ class RangeAttacker : public Attacker
     };
 
     Intervals M;
+    Integer s;
 
-    RangeAttacker(const Server& srv, const Integer& c) : Attacker(srv, c, "Bleichenbacher Attacker")
+    public:
+    RangeAttacker(const Server& srv, const Integer& c) : Attacker(srv, c, "Range Attacker")
     {
+    }
+
+    void attack() {
         M.insert(2 * B, 3 * B - 1);
+        s = div_ceil(n,3*B);
+        incremental_search(); //step 2.a
+        debug() << "finished step 2.a" << std::endl;
+
+        for(int i = 1; M.size() > 0; ++i){
+            if(i != 1 && M.count() > 1){
+                ++s;
+                incremental_search();
+                if(i % 100 == 0) debug() << "finished step 2.b for i=" << i << std::endl;
+            }
+            else if (i != 1 && M.count() == 1){
+                repivot();
+                if(i % 100 == 0) debug() << "finished step 2.c for i=" << i << std::endl;
+            }
+            interval_divsion();
+        }
+
+    }
+    
+    II result(){
+        return M.enclose();
     }
 
     // step 3
-    void interval_divsion(const Integer& s)
+    void interval_divsion()
     {
         Intervals res;
         for (const auto& p : M.arr)
@@ -295,10 +354,10 @@ class RangeAttacker : public Attacker
     }
 
     // step 2.c
-    void repivot(Integer& s, const Intervals::II& range)
+    void repivot()
     {
-        const Integer& a = range.first;
-        const Integer& b = range.second;
+        const Integer& a = M.front().first;
+        const Integer& b = M.front().second;
         for (Integer r = div_ceil(2 * b * s - 4 * B, n);; ++r)
             for (s = div_ceil(2 * B + r * n, b); s < div_ceil(3 * B + r * n, a); ++s)
                 if (is_good_pivot(s)) return;
@@ -306,7 +365,7 @@ class RangeAttacker : public Attacker
 
     // step 2.a
     // step 2.b
-    void incremental_search(Integer& s)
+    void incremental_search()
     {
         while (!is_good_pivot(s))
         {
@@ -315,108 +374,173 @@ class RangeAttacker : public Attacker
     }
 };
 
-class BlindingAttacker : public Attacker
+class MultiThreadAttack
 {
-    const std::atomic_bool* pkill;
 
     public:
-    BlindingAttacker(const Server& srv, const Integer& c, const std::atomic_bool* pkill = nullptr)
-    : Attacker(srv, c, "Blinding Attacker"), pkill(pkill)
+    static MultiThreadAttack& get_instance()
     {
-    }
-
-    inline bool not_killed() const
-    {
-        return (pkill == nullptr || !*pkill);
-    }
-
-    Integer blind()
-    {
-        Integer s = 0;
-        CryptoPP::AutoSeededRandomPool prng;
-        do
-        {
-            s.Randomize(prng, 2, n - 1);
-        } while (!is_good_pivot(s) && not_killed());
-        return s;
-    }
-};
-
-class MultiThreadBlinding
-{
-    // singelton design pattern
-    MultiThreadBlinding()
-    {
-    }
-
-    public:
-    static MultiThreadBlinding& get_instance()
-    {
-        static MultiThreadBlinding instance;
+        static MultiThreadAttack instance;
         return instance;
     }
-    MultiThreadBlinding(MultiThreadBlinding const&) = delete;
-    void operator=(MultiThreadBlinding const&) = delete;
+    
+    private:
+    // singelton design pattern
+    MultiThreadAttack()
+    {
+    }
+
+    MultiThreadAttack(MultiThreadAttack const&) = delete;
+    void operator=(MultiThreadAttack const&) = delete;
 
     private:
-    const int thread_num = 4;
-    std::vector<Integer> values;
-    std::mutex values_mutex;
-    std::atomic_bool finish_blinding;
+    const Server* srv;
+    const Integer* c;
+
+    const int thread_num = std::max(int(std::thread::hardware_concurrency()),1);
+    
     int number_of_blindings;
 
-    static void blinding_thread(const Server* srv, const Integer* c)
+    std::atomic_bool finish_blinding;
+    std::mutex blindings_mutex;
+    std::vector<Integer> blindings;
+    
+    int current_range;
+    std::vector<II> ranges;
+    std::mutex current_range_mutex;
+
+    static void blinding_thread()
     {
-        MultiThreadBlinding& MTB = get_instance();
-        BlindingAttacker attacker(*srv, *c, &MTB.finish_blinding);
+        MultiThreadAttack& MTA = get_instance();
+        BlindingAttacker attacker(*MTA.srv, *MTA.c, &MTA.finish_blinding);
         Integer blind_value;
 
-        while (!MTB.finish_blinding)
+        while (!MTA.finish_blinding)
         {
             attacker.reset();
             try
             {
                 blind_value = attacker.blind();
-                if (MTB.finish_blinding) break;
-                attacker.debug(1) << "Found blinding value!" << std::endl;
+                if (MTA.finish_blinding) break;
+                attacker.debug() << "Found blinding value!" << std::endl;
                 {
-                    std::lock_guard<std::mutex> lock(MTB.values_mutex);
-                    MTB.values.push_back(blind_value);
-                    std::clog << "Number of blindings found " << MTB.values.size() << std::endl;
-                    if (MTB.values.size() >= MTB.number_of_blindings) MTB.finish_blinding = true;
+                    std::lock_guard<std::mutex> lock(MTA.blindings_mutex);
+                    MTA.blindings.push_back(blind_value);
+                    std::clog << "Number of blindings found " << MTA.blindings.size() << std::endl;
+                    if (MTA.blindings.size() >= MTA.number_of_blindings) MTA.finish_blinding = true;
                 }
             }
             catch (std::exception& e)
             {
-                attacker.debug(1) << "Killed before blinding value found" << std::endl;
+                attacker.debug() << "Killed before blinding value found" << std::endl;
             }
         }
     }
 
-    public:
-    const std::vector<Integer>& get_blindings(const Server& srv, const Integer& c, int number_of_blindings)
+    static void range_thread()
     {
-        this->number_of_blindings = number_of_blindings;
-        values.clear();
-        finish_blinding = false;
+        MultiThreadAttack& MTA = get_instance();
+        int i;
+        Integer c0;
+        while (true)
+        {
+            {
+                std::lock_guard<std::mutex> lock(MTA.current_range_mutex);
+                i = MTA.current_range++;
+            }
+            if(i >= MTA.number_of_blindings) break;
+            
+            c0 = MTA.srv->publicKey.ApplyFunction(MTA.blindings[i]).Times(*MTA.c).Modulo(MTA.srv->publicKey.GetModulus());
+            RangeAttacker attacker(*MTA.srv, c0);
+            
+            try
+            {
+                attacker.reset();
+                attacker.attack();
+                attacker.debug() << "Found final value!" << std::endl; 
+            }
+            catch (std::exception& e)
+            {
+                attacker.debug() << "Killed before final value found" << std::endl;
+            }
+            MTA.ranges[i] = attacker.result();
+        }
+    }
 
+    public:
+
+    void set_params(const Server& srv, const Integer& c,int number_of_blindings){
+        this->srv = &srv;
+        this->c = &c;
+        this->number_of_blindings = number_of_blindings;
+        blindings.clear();
+        finish_blinding = false;
+        current_range_idx = 0;
+        ranges = std::vector<II>(number_of_blindings);
+    }
+
+    void get_blindings()
+    {
         std::vector<std::thread> threads;
         for (int i = 1; i < thread_num; ++i)
-            threads.push_back(std::move(std::thread(blinding_thread, &srv, &c)));
-        blinding_thread(&srv, &c);
+            threads.push_back(std::move(std::thread(blinding_thread)));
+        blinding_thread();
+        
         for (auto& t : threads)
-            if (t.joinable()) t.join();
-
+            if (t.joinable())
+                t.join();
         finish_blinding = true;
-        return values;
+    }
+
+    void get_ranges(){
+        std::vector<std::thread> threads;
+        for (int i = 1; i < thread_num; ++i)
+            threads.push_back(std::move(std::thread(range_thread)));
+        range_thread();
+
+        for (auto& t : threads)
+            if (t.joinable())
+                t.join();
+        current_range_idx = ranges.size();
     }
 };
 
+std::string lap(const std::chrono::steady_clock::time_point& begin)
+{
+    using std::chrono::steady_clock;
+    using std::to_string;
+
+    int seconds = ((steady_clock::now()-begin).count() * steady_clock::period::num) / steady_clock::period::den;
+    int hours = seconds / 3600;
+    int minutes = (seconds % 3600) / 60;
+    seconds %= 60;
+    return to_string(hours) + "h" + to_string(minutes) + "m" + to_string(seconds) + "s";
+}
+
 int main(int argc, char* argv[])
 {
+    
+    std::ofstream out("log1.txt");
+    std::streambuf *coutbuf = std::clog.rdbuf(); //save old buf
+    std::clog.rdbuf(out.rdbuf()); //redirect std::clog to log.txt
+
     Server srv(2048);
     Integer c = srv.pkcs_encrypt("He11o w0r1d! My n4me is 0fer! This is my secret");
-    auto& blinding_values = MultiThreadBlinding::get_instance().get_blindings(srv, c, 5);
+    
+    std::clog << "Main debug: ";
+    std::clog << "keysize=" << srv.publicKey.GetModulus().BitCount();
+    std::clog << ", attacker killed after " << max_message_count << " messages" << std::endl;
+
+
+
+    auto begin_time = std::chrono::steady_clock::now();
+
+    auto& MTA = MultiThreadAttack::get_instance();
+    MTA.set_params(srv,c,50);
+    MTA.get_blindings();
+    MTA.get_ranges();
+
+    std::clog << "Main debug: running time " << lap(begin_time) << std::endl;
 
     return 0;
 }
