@@ -31,8 +31,29 @@ class Server
     CryptoPP::RSA::PrivateKey privateKey;
 
     public:
+    std::ostream& print(std::ostream& os) const {
+        os << std::hex << publicKey.GetModulus() << std::endl;
+        os << std::hex << publicKey.GetPublicExponent() << std::endl;
+        os << std::hex << privateKey.GetPrivateExponent() << std::endl;
+        return os;
+    }
+
+    public:
     int keysize;
     CryptoPP::RSA::PublicKey publicKey;
+
+    Server(std::istream& is){
+        Integer n,e,d,x;
+        is  >> n;
+        is >> e;
+        is >> d;
+        
+        CryptoPP::InvertibleRSAFunction params;
+        params.Initialize(n,e,d);
+        publicKey = CryptoPP::RSA::PublicKey(params);
+        privateKey = CryptoPP::RSA::PrivateKey(params);
+        keysize = n.BitCount();
+    }
 
     Server(int keysize) : keysize(keysize)
     {
@@ -483,6 +504,7 @@ class MultiThreadAttack
     }
 
     public:
+
     void set_params(const Server& srv, const Integer& c, int number_of_blindings)
     {
         this->srv = &srv;
@@ -492,6 +514,13 @@ class MultiThreadAttack
         finish_blinding = false;
         current_range = 0;
         ranges = std::vector<II>(number_of_blindings);
+    }
+
+    const std::vector<Integer>& get_blindings() const {
+        return blindings;
+    }
+    void push_blinding(const Integer& s){
+        blindings.push_back(s);
     }
 
     void calc_blindings()
@@ -558,26 +587,50 @@ std::string lap(const std::chrono::steady_clock::time_point& begin)
     return to_string(hours) + "h" + to_string(minutes) + "m" + to_string(seconds) + "s";
 }
 
-int main(int argc, char* argv[])
-{
-    std::streambuf* clogbuf = std::clog.rdbuf();
-    ; // save old buf
-    std::clog.rdbuf(std::cout.rdbuf()); // redirect std::clog to std::cout to suupport ouput to file
 
+void debug(){
+    std::ifstream is("out copy.txt");
+    int number_of_blindings;
+    is >> number_of_blindings;
+    Server srv(is);
+    Integer c,s;
+    is >> c;
+
+    auto& MTA = MultiThreadAttack::get_instance();
+    MTA.set_params(srv, c, number_of_blindings);
+    
+    for(int i = 0; i < number_of_blindings; ++i){
+        is >> s;
+        MTA.push_blinding(s);
+    }
+
+    MTA.calc_ranges();
+}
+
+void run(int number_of_blindings){
+    std::cout << number_of_blindings << std::endl;
     // setting up server to be attacked
     Server srv(2048);
+    srv.print(std::cout);
     Integer c = srv.pkcs_encrypt("He11o w0r1d! My n4me is 0fer! This is my secret");
+    
+    std::cout << std::hex << c << std::endl;
 
     // logging attack beggining
     std::clog << "Main debug: ";
     std::clog << "keysize=" << srv.publicKey.GetModulus().BitCount();
-    std::clog << ", attacker killed after " << max_message_count << " messages" << std::endl;
+    std::clog << ", attacker will be killed after " << max_message_count << " messages" << std::endl;
 
     // begining attack
     auto begin_time = std::chrono::steady_clock::now();
     auto& MTA = MultiThreadAttack::get_instance();
-    MTA.set_params(srv, c, 20);
+    MTA.set_params(srv, c, number_of_blindings);
     MTA.calc_blindings();
+    const auto& blindings = MTA.get_blindings();
+
+    for(int i = 0; i < blindings.size(); ++i)
+        std::cout << std::hex << blindings[i] << std::endl;
+        
     MTA.calc_ranges();
     MTA.calc_result();
     // outputting the result of the attack
@@ -591,8 +644,11 @@ int main(int argc, char* argv[])
         std::clog << "Main debug: algorithm failed, error " << e.what() << std::endl;
     }
     std::clog << "Main debug: running time " << lap(begin_time) << std::endl;
+}
 
-    std::clog.rdbuf(clogbuf); // returning std::clog to it's intital position
-
+int main(int argc, char* argv[])
+{
+    if(argc > 1) debug();
+    else run(50);
     return 0;
 }
