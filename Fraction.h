@@ -1,3 +1,4 @@
+
 #ifndef FRACTION_H
 #define FRACTION_H
 
@@ -27,9 +28,10 @@ class Fraction
     public:
     Fraction(const int64_t& a, const int64_t& b = 1) : a(a), b(b)
     {
+        fix();
     }
 
-    Fraction(const CryptoPP::Integer& a = 0, const CryptoPP::Integer& b = 1) : a(a), b(b)
+    Fraction(CryptoPP::Integer a = 0, CryptoPP::Integer b = 1) : a(std::move(a)), b(std::move(b))
     {
         fix();
     }

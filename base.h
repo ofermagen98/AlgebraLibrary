@@ -1,3 +1,6 @@
+#include <cryptopp/integer.h>
+#include <sstream>
+
 #ifndef BASE_H
 #define BASE_H
 
@@ -5,9 +8,22 @@
 
 namespace AlgebraTAU
 {
-
 class Fraction;
-std::string to_string(const Fraction& f);
+
+std::string to_string(const CryptoPP::Integer& x)
+{
+    std::stringstream ss;
+    ss << x;
+    return ss.str();
+}
+
+CryptoPP::Integer abs(const CryptoPP::Integer& x)
+{
+    return x.AbsoluteValue();
+}
+
+AlgebraTAU::Fraction abs(const AlgebraTAU::Fraction& x);
+std::string to_string(const AlgebraTAU::Fraction& x);
 
 template <typename T>
 inline T sqaure(const T& t)

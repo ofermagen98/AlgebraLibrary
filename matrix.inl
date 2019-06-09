@@ -154,6 +154,15 @@ matrix<T> matrix<T>::operator-(const matrix& other) const
 }
 
 template <typename T>
+matrix<T> matrix<T>::I(int n)
+{
+    matrix<T> res(n, n);
+    for (int i = 0; i < n; ++i)
+        res(i, i) = 1;
+    return res;
+}
+
+template <typename T>
 matrix<T>& matrix<T>::operator*=(const T& a)
 {
     for (int i = 0; i < rows(); ++i)
@@ -190,12 +199,113 @@ matrix<T> matrix<T>::operator*(const T& a) const
     return res;
 }
 
+template <typename T>
+void integral_LLL(matrix<T>& b)
+{
+    using AlgebraTAU::abs;
+    using std::abs;
+
+    if (b.columns() != b.rows()) throw std::invalid_argument("matrice should be a square matrix");
+    if (b.rows() <= 1) return;
+    b = b.transpose();
+    int n = b.rows();
+    //matrix<T> H = matrix<T>::I(n);
+    matrix<T> lambda(n, n); // TODO! intialize lambda?
+
+    std::vector<T> dtmp(n + 1, 1);
+    auto d = [&dtmp](int i) -> T& { return dtmp[i + 1]; };
+    d(-1) = 1;
+    d(0) = b.get_row(0).norm();
+    int k = 1, kmax = 0;
+
+    auto REDI = [&](int k, int l) {
+        T q;
+        if (abs(2 * lambda(k, l)) > d(l))
+        {
+            q = (2 * lambda(k, l) + d(l)) / (2 * d(l));
+
+            for (int t = 0; t < n; ++t)
+            {
+                //H(k, t) -= q * H(l, t);
+                b(k, t) -= q * b(l, t);
+            }
+            lambda(k, l) -= q * d(l);
+
+            for (int i = 0; i <= l - 1; ++i)
+                lambda(k, i) -= q * lambda(l, i);
+        }
+    };
+
+    auto SWAPI = [&](int k) {
+        for (int t = 0; t < n; ++t)
+        {
+            //std::swap(H(k, t), H(k - 1, t));
+            std::swap(b(k, t), b(k - 1, t));
+        }
+
+        for (int j = 0; j <= k - 2; ++j)
+            std::swap(lambda(k, j), lambda(k - 1, j));
+
+        T L = lambda(k, k - 1);
+        T B = (d(k - 2) * d(k) + L * L) / d(k - 1);
+        T t;
+
+        for (int i = k + 1; i <= kmax; ++i)
+        {
+            t = lambda(i, k);
+            lambda(i, k) = (d(k) * lambda(i, k - 1) - L * t) / d(k - 1);
+            lambda(i, k - 1) = (B * t + L * lambda(i, k)) / d(k);
+        }
+
+        d(k - 1) = B;
+    };
+
+    T u, tmp1, tmp2;
+    while (k < n)
+    {
+        // step 2
+        if (k > kmax)
+        {
+            kmax = k;
+            for (int j = 0; j <= k; ++j)
+            {
+                u = 0;
+                for (int t = 0; t < n; ++t)
+                    u += b(k, t) * b(j, t);
+
+                for (int i = 0; i <= j - 1; ++i)
+                    u = (d(i) * u - lambda(k, i) * lambda(j, i)) / d(i - 1);
+
+                if (j < k)
+                    lambda(k, j) = u;
+                else
+                    d(k) = u;
+            }
+            if (d(k) == 0) throw std::invalid_argument("matrix do not form a basis");
+        }
+
+        // step 3
+        REDI(k, k - 1);
+        while (4 * d(k) * d(k - 2) + 4 * lambda(k, k - 1) * lambda(k, k - 1) < 3 * d(k - 1) * d(k - 1))
+        {
+            SWAPI(k);
+            k = std::max(1, k - 1);
+            REDI(k, k - 1);
+        }
+
+        for (int l = k - 2; l >= 0; --l)
+            REDI(k, l);
+        ++k;
+    }
+
+    b = b.transpose();
+}
+
 // The algorithm as described in
 // https://en.wikipedia.org/wiki/Lenstra%E2%80%93Lenstra%E2%80%93Lov%C3%A1sz_lattice_basis_reduction_algorithm
 template <typename T>
 void LLL(matrix<T>& m, const T& delta)
 {
-
     using std::abs;
 
     int n = m.rows() - 1;
@@ -362,7 +472,7 @@ void matrix<T>::map(const F& f)
 {
     for (int i = 0; i < rows(); ++i)
         for (int j = 0; j < rows(); ++j)
-            self(i, j) = f(self(i, j));
+            f(self(i, j));
 }
 
 template <typename T>
@@ -439,18 +549,22 @@ std::ostream& operator<<(std::ostream& out, const matrix<T>& m)
     using AlgebraTAU::to_string;
     using std::to_string;
 
-    std::string res = "";
-
+    std::string res = "{";
+    // res.push_back('\n');
     for (int i = 0; i < m.rows(); ++i)
     {
+        res.push_back('{');
         for (int j = 0; j < m.columns(); ++j)
             res += to_string(m(i, j)) + ", ";
 
         res.pop_back();
-        res.back() = '\n';
+        res.back() = '}';
+        res.push_back(',');
+        // res.push_back('\n');
     }
     res.pop_back();
-
+    // res.back() = '\n';
+    res.push_back('}');
     return out << res;
 }
 } // namespace AlgebraTAU

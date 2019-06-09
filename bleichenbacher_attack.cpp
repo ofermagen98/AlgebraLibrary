@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <exception>
+
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -17,39 +18,43 @@
 
 using AlgebraTAU::Fraction;
 using CryptoPP::Integer;
-const int max_message_count = 20000;
+const int max_message_count = 1<<16;
 typedef std::pair<Integer, Integer> II;
 
-inline Integer div_ceil(const Integer& x, const Integer& y)
+template <typename T>
+inline T div_ceil(const T& x, const T& y)
 {
     return ((x + y - 1) / y);
 }
 
 class Server
 {
+    //TODO change!
     private:
     CryptoPP::RSA::PrivateKey privateKey;
 
     public:
-    std::ostream& print(std::ostream& os) const {
+    std::ostream& print(std::ostream& os) const
+    {
         os << std::hex << publicKey.GetModulus() << std::endl;
         os << std::hex << publicKey.GetPublicExponent() << std::endl;
         os << std::hex << privateKey.GetPrivateExponent() << std::endl;
         return os;
     }
+    int keysize;
 
     public:
-    int keysize;
     CryptoPP::RSA::PublicKey publicKey;
 
-    Server(std::istream& is){
-        Integer n,e,d,x;
-        is  >> n;
+    Server(std::istream& is)
+    {
+        Integer n, e, d, x;
+        is >> n;
         is >> e;
         is >> d;
-        
+
         CryptoPP::InvertibleRSAFunction params;
-        params.Initialize(n,e,d);
+        params.Initialize(n, e, d);
         publicKey = CryptoPP::RSA::PublicKey(params);
         privateKey = CryptoPP::RSA::PrivateKey(params);
         keysize = n.BitCount();
@@ -200,19 +205,11 @@ std::mutex Attacker::id_mutex;
 
 class BlindingAttacker : public Attacker
 {
-    const std::atomic_bool* pkill;
-
     public:
-    BlindingAttacker(const Server& srv, const Integer& c, const std::atomic_bool* pkill = nullptr)
-    : Attacker(srv, c, "Blinding Attacker"), pkill(pkill)
+    BlindingAttacker(const Server& srv, const Integer& c)
+    : Attacker(srv, c, "Blinding Attacker")
     {
     }
-
-    inline bool not_killed() const
-    {
-        return (pkill == nullptr || !*pkill);
-    }
-
     Integer blind()
     {
         Integer s = 0;
@@ -220,7 +217,7 @@ class BlindingAttacker : public Attacker
         do
         {
             s.Randomize(prng, 2, n / 2);
-        } while (!is_good_pivot(s) && not_killed());
+        } while (!is_good_pivot(s));
         return s;
     }
 };
@@ -386,45 +383,161 @@ class RangeAttacker : public Attacker
 class MultiThreadAttack
 {
 
-    public:
-    static MultiThreadAttack& get_instance()
-    {
-        static MultiThreadAttack instance;
-        return instance;
-    }
-
     private:
-    // singelton design pattern
-    MultiThreadAttack()
-    {
-    }
+    std::ostream& os;
+    std::mutex os_mutex;
 
-    MultiThreadAttack(MultiThreadAttack const&) = delete;
-    void operator=(MultiThreadAttack const&) = delete;
-
-    private:
-    const Server* srv;
-    const Integer* c;
-
-    const int thread_num = std::max(int(std::thread::hardware_concurrency()), 1);
-
+    const Server& srv;
+    const Integer& c;
+    const int thread_num;
     int number_of_blindings;
 
-    std::atomic_bool finish_blinding;
+    std::atomic_int32_t blindings_calced;
     std::mutex blindings_mutex;
+
+    std::atomic_int32_t ranges_calced;
+    std::mutex ranges_mutex;
+
     std::vector<Integer> blindings;
 
-    int current_range;
-    std::vector<II> ranges;
-    std::mutex current_range_mutex;
+    public:
+    MultiThreadAttack(const Server& srv,
+                      const Integer& c,
+                      int number_of_blindings,
+                      std::ostream& os,
+                      int thread_num = std::thread::hardware_concurrency())
+    : os(os), srv(srv), c(c), thread_num(std::max(1,thread_num)), number_of_blindings(number_of_blindings)
+        ,blindings(number_of_blindings)
+    {
+    }
 
-    Integer m;
+    private:
+    void blinding_thread()
+    {
+        BlindingAttacker attacker(srv, c);
+        Integer blind_value;
+
+        while (blindings_calced < number_of_blindings)
+        {
+            attacker.reset();
+            try
+            {
+                blind_value = attacker.blind();
+                {
+                    std::lock_guard<std::mutex> lock(blindings_mutex);
+                    if (blindings_calced >= number_of_blindings) break;
+                    ++blindings_calced;
+                }
+                {
+                    std::lock_guard<std::mutex> os_mutex(blindings_mutex);
+                    attacker.debug() << "Found blinding value!" << std::endl;
+                    os << blind_value << std::endl;
+                    std::clog << "Number of blindings found " << blindings_calced << std::endl;
+                }
+            }
+            catch (std::exception& e)
+            {
+                attacker.debug() << "Killed before blinding value found" << std::endl;
+            }
+        }
+    }
+
+    void range_thread()
+    {
+        int i;
+        Integer c0;
+        while (ranges_calced < number_of_blindings)
+        {
+            {
+                std::lock_guard<std::mutex> lock(ranges_mutex);
+                i = ranges_calced++;
+                if (i >= number_of_blindings) break;
+            }
+
+            c0 = srv.publicKey.ApplyFunction(blindings[i]).Times(c).Modulo(srv.publicKey.GetModulus());
+            RangeAttacker attacker(srv, c0);
+
+            try
+            {
+                attacker.reset();
+                attacker.attack();
+                attacker.debug() << "Found final value!" << std::endl;
+                os << attacker.result().first << std::endl;
+                exit(1);
+            }
+            catch (std::exception& e)
+            {
+                attacker.debug() << "Killed before final value found" << std::endl;
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(os_mutex);
+                os << i << std::endl;
+                os << attacker.result().first << std::endl;
+            }
+        }
+    }
+
+    public:
+    void calc_blindings(int begin)
+    {
+        if (blindings.size() != number_of_blindings)
+            throw std::runtime_error("invalid number of blindings");
+        blindings_calced = begin;
+        std::vector<std::thread> threads;
+        for (int i = 1; i < thread_num; ++i)
+            threads.push_back(std::thread([this]() { this->blinding_thread(); }));
+        blinding_thread();
+
+        for (auto& t : threads)
+            if (t.joinable()) t.join();
+    }
+
+    void calc_ranges(int begin)
+    {
+        ranges_calced = begin;
+        std::vector<std::thread> threads;
+        for (int i = 1; i < thread_num; ++i)
+            threads.push_back(std::thread([this]() { this->range_thread(); }));
+        range_thread();
+        for (auto& t : threads)
+            if (t.joinable()) t.join();
+    }
+
+    void set_blinding(int i, const Integer& x)
+    {
+        blindings[i] = x;
+    }
+};
+
+std::string lap(const std::chrono::steady_clock::time_point& begin)
+{
+    using std::to_string;
+    using std::chrono::steady_clock;
+
+    int seconds =
+    ((steady_clock::now() - begin).count() * steady_clock::period::num) / steady_clock::period::den;
+    int hours = seconds / 3600;
+    int minutes = (seconds % 3600) / 60;
+    seconds %= 60;
+    return to_string(hours) + "h" + to_string(minutes) + "m" + to_string(seconds) + "s";
+}
+
+class AttackHandler
+{
+    const int keysize;
+    std::string params_file, blinding_file, ranges_file;
+
+
+    int number_of_blindings()
+    {
+        return div_ceil(keysize, 8);
+    }
 
     std::string pkcs_decode(const Integer& m) const
     {
         int sz = m.ByteCount();
-        if (sz * 8 != srv->publicKey.GetModulus().BitCount() - 8)
-            throw std::invalid_argument("invalid message length");
+        if (sz * 8 != keysize - 8) throw std::invalid_argument("invalid message length");
         if (m.GetByte(sz - 1) != 2) throw std::invalid_argument("invalid message padding");
         for (int i = sz - 2; i > sz - 10; --i)
             if (m.GetByte(i) == 0) throw std::invalid_argument("invalid message padding");
@@ -443,212 +556,160 @@ class MultiThreadAttack
         return res.data();
     }
 
-    static void blinding_thread()
+    void generate_params(const std::string& message, int keysize)
     {
-        MultiThreadAttack& MTA = get_instance();
-        BlindingAttacker attacker(*MTA.srv, *MTA.c, &MTA.finish_blinding);
-        Integer blind_value;
-
-        while (!MTA.finish_blinding)
-        {
-            attacker.reset();
-            try
-            {
-                blind_value = attacker.blind();
-                if (MTA.finish_blinding) break;
-                attacker.debug() << "Found blinding value!" << std::endl;
-                {
-                    std::lock_guard<std::mutex> lock(MTA.blindings_mutex);
-                    MTA.blindings.push_back(blind_value);
-                    std::clog << "Number of blindings found " << MTA.blindings.size() << std::endl;
-                    if (MTA.blindings.size() >= MTA.number_of_blindings) MTA.finish_blinding = true;
-                }
-            }
-            catch (std::exception& e)
-            {
-                attacker.debug() << "Killed before blinding value found" << std::endl;
-            }
-        }
+        std::ifstream is(params_file);
+        if (is.good()) return;
+        std::ofstream out(params_file);
+        Server srv(keysize);
+        Integer c = srv.pkcs_encrypt(message);
+        srv.print(out) << c << std::endl;
     }
 
-    static void range_thread()
+    std::string calc_result()
     {
-        MultiThreadAttack& MTA = get_instance();
-        int i;
-        Integer c0;
-        while (true)
-        {
-            {
-                std::lock_guard<std::mutex> lock(MTA.current_range_mutex);
-                i = MTA.current_range++;
-            }
-            if (i >= MTA.number_of_blindings) break;
+        std::ifstream srv_is(params_file);
+        std::ifstream blindings(blinding_file);
+        std::ifstream ranges(ranges_file);
 
-            c0 = MTA.srv->publicKey.ApplyFunction(MTA.blindings[i])
-                 .Times(*MTA.c)
-                 .Modulo(MTA.srv->publicKey.GetModulus());
-            RangeAttacker attacker(*MTA.srv, c0);
-
-            try
-            {
-                attacker.reset();
-                attacker.attack();
-                attacker.debug() << "Found final value!" << std::endl;
-            }
-            catch (std::exception& e)
-            {
-                attacker.debug() << "Killed before final value found" << std::endl;
-            }
-            MTA.ranges[i] = attacker.result();
+        //recovering the calculated data
+        Server srv(srv_is);
+        Integer N, c, x;
+        srv_is >> c;
+        CryptoPP::AutoSeededRandomPool prng;
+        int k = number_of_blindings();
+        N = srv.publicKey.GetModulus();
+        std::vector<Integer> s(k),a(k);
+        int t;
+        for (int i = 0; i < k; ++i){
+            blindings >> s[i];
+            ranges >> t;
+            ranges >> a[t];
         }
+
+        //constructing the lattice matrix
+        AlgebraTAU::matrix<Integer> M(k + 1, k + 1);
+        for (int i = 0; i < k; ++i)
+        {
+            M(i + 1, i) = N;
+            M(0, i) = s[i];
+            M(k, i) = a[i];
+        }
+        M *= k;
+        M(k, k) = N * (k - 1);
+        M = M.transpose();
+        
+        //preforming the LLL reduction
+        AlgebraTAU::integral_LLL(M);
+        
+        //finding the shortest vector
+        std::vector<Integer> norms(k+1);
+        for(int i = 0; i < k+1; ++i) norms[i] = M.get_column(i).norm();
+        std::vector<int> sorted(k+1);
+        for(int i = 0; i < k+1; ++i) sorted[i] = i;
+        std::sort(sorted.begin(),sorted.end(),[&norms](int i , int j){ return norms[i] < norms[j]; });
+        auto R = M.get_column(sorted[0]).transpose();
+
+        //Recovering the message
+        CryptoPP::ModularArithmetic ma(N);
+        x = (R(0) / k) % N;
+        Integer pred = ma.MultiplicativeInverse(s[0]);
+        pred = ma.Multiply(pred,x);
+        return pkcs_decode(pred);
+    }
+
+    void find_ranges()
+    {
+        std::ifstream srv_is(params_file);
+        std::ifstream blindings(blinding_file);
+        std::ofstream ranges(ranges_file, std::ios_base::app);
+        Server srv(srv_is);
+        Integer c;
+        srv_is >> c;
+        int calced = num_of_lines(ranges_file);
+        if (calced >= number_of_blindings()) return;
+
+        // logging attack beggining
+        std::clog << "Main debug (ranging): ";
+        std::clog << "keysize=" << keysize;
+        std::clog << ", attacker will be killed after " << max_message_count << " messages" << std::endl;
+
+        MultiThreadAttack MTA(srv, c, number_of_blindings(), ranges);
+        Integer x;
+        for (int i = 0; i < number_of_blindings(); ++i)
+        {
+            blindings >> x;
+            MTA.set_blinding(i,x);
+        }
+        MTA.calc_ranges(calced);
+    }
+
+    void find_blindings()
+    {
+        // setting up server to be attacked
+        std::ifstream params(params_file.c_str());
+        std::ofstream blindings(blinding_file.c_str(), std::ios_base::app);
+        Server srv(params);
+        const int calced = num_of_lines(blinding_file);
+        Integer c;
+        params >> c;
+        if (calced >= number_of_blindings()) return;
+
+        // logging attack beggining
+        std::clog << "Main debug (blinding): ";
+        std::clog << "keysize=" << keysize;
+        std::clog << ", attacker will be killed after " << max_message_count << " messages" << std::endl;
+
+        // begining attack
+        auto begin_time = std::chrono::steady_clock::now();
+        MultiThreadAttack MTA(srv, c, number_of_blindings(), blindings);
+        MTA.calc_blindings(calced);
+        std::clog << "Main debug: running time " << lap(begin_time) << std::endl;
+    }
+
+    static bool file_exists(const std::string& path)
+    {
+        std::ifstream f(path.c_str());
+        return f.good();
+    }
+
+    static int num_of_lines(const std::string& filename)
+    {
+        std::ifstream is(filename.c_str());
+        int count = 0;
+        std::string s;
+        while (std::getline(is, s))
+            ++count;
+        return count;
     }
 
     public:
-
-    void set_params(const Server& srv, const Integer& c, int number_of_blindings)
+    AttackHandler(int keysize, const std::string& params_file, const std::string& blinding_file, const std::string& ranges_file)
+    : keysize(keysize), params_file(params_file), blinding_file(blinding_file), ranges_file(ranges_file)
     {
-        this->srv = &srv;
-        this->c = &c;
-        this->number_of_blindings = number_of_blindings;
-        blindings.clear();
-        finish_blinding = false;
-        current_range = 0;
-        ranges = std::vector<II>(number_of_blindings);
+        if (!file_exists(params_file)) generate_params("hello my name is ofer", keysize);
     }
 
-    const std::vector<Integer>& get_blindings() const {
-        return blindings;
-    }
-    void push_blinding(const Integer& s){
-        blindings.push_back(s);
-    }
-
-    void calc_blindings()
+    void run()
     {
-        std::vector<std::thread> threads;
-        for (int i = 1; i < thread_num; ++i)
-            threads.push_back(std::thread(blinding_thread));
-        blinding_thread();
-
-        for (auto& t : threads)
-            if (t.joinable()) t.join();
-        finish_blinding = true;
-    }
-
-    void calc_ranges()
-    {
-        std::vector<std::thread> threads;
-        for (int i = 1; i < thread_num; ++i)
-            threads.push_back(std::thread(range_thread));
-        range_thread();
-
-        for (auto& t : threads)
-            if (t.joinable()) t.join();
-        current_range = ranges.size();
-    }
-
-    void calc_result()
-    {
-        using namespace AlgebraTAU;
-        matrix<Fraction> B(number_of_blindings + 1, number_of_blindings + 1, 0);
-        const Integer& n = srv->publicKey.GetModulus();
-        CryptoPP::ModularArithmetic modN = n;
-
-        for (int i = 0; i < number_of_blindings; ++i)
-        {
-            B(0, i) = blindings[i];
-            B(i + 1, i) = n;
-            B(number_of_blindings, i) = ranges[i].first;
-        }
-        B(number_of_blindings, number_of_blindings) =
-        Fraction(n * (number_of_blindings - 1), number_of_blindings);
-        LLL(B, Fraction(3, 4));
-
-        Integer r0 = B(1, 0).round(), a0 = ranges[0].first, s0 = blindings[0];
-        this->m = modN.Multiply(modN.Add(r0, a0), modN.Inverse(s0));
-    }
-
-    std::string get_result() const
-    {
-        return pkcs_decode(m);
+        find_blindings();
+        find_ranges();
+        calc_result();
     }
 };
 
-std::string lap(const std::chrono::steady_clock::time_point& begin)
+int main(int argc, char const* argv[])
 {
-    using std::to_string;
-    using std::chrono::steady_clock;
-
-    int seconds =
-    ((steady_clock::now() - begin).count() * steady_clock::period::num) / steady_clock::period::den;
-    int hours = seconds / 3600;
-    int minutes = (seconds % 3600) / 60;
-    seconds %= 60;
-    return to_string(hours) + "h" + to_string(minutes) + "m" + to_string(seconds) + "s";
-}
-
-
-void debug(){
-    std::ifstream is("out copy.txt");
-    int number_of_blindings;
-    is >> number_of_blindings;
-    Server srv(is);
-    Integer c,s;
-    is >> c;
-
-    auto& MTA = MultiThreadAttack::get_instance();
-    MTA.set_params(srv, c, number_of_blindings);
+    if(argc == 3){
+        int keysize = std::stoi(std::string(argv[1]));
+        std::string dir = argv[2];
+        dir += "/";
+        //auto clogbuf = std::clog.rdbuf();
+        std::ifstream log_file(dir+"log.txt",std::ios_base::app);
+        std::clog.rdbuf(log_file.rdbuf());
+        AttackHandler hndl(keysize,dir+"args.txt",dir+"blidings.txt",dir+"ranges.txt");
+        hndl.run();
+    }
     
-    for(int i = 0; i < number_of_blindings; ++i){
-        is >> s;
-        MTA.push_blinding(s);
-    }
-
-    MTA.calc_ranges();
-}
-
-void run(int number_of_blindings){
-    std::cout << number_of_blindings << std::endl;
-    // setting up server to be attacked
-    Server srv(2048);
-    srv.print(std::cout);
-    Integer c = srv.pkcs_encrypt("He11o w0r1d! My n4me is 0fer! This is my secret");
-    
-    std::cout << std::hex << c << std::endl;
-
-    // logging attack beggining
-    std::clog << "Main debug: ";
-    std::clog << "keysize=" << srv.publicKey.GetModulus().BitCount();
-    std::clog << ", attacker will be killed after " << max_message_count << " messages" << std::endl;
-
-    // begining attack
-    auto begin_time = std::chrono::steady_clock::now();
-    auto& MTA = MultiThreadAttack::get_instance();
-    MTA.set_params(srv, c, number_of_blindings);
-    MTA.calc_blindings();
-    const auto& blindings = MTA.get_blindings();
-
-    for(int i = 0; i < blindings.size(); ++i)
-        std::cout << std::hex << blindings[i] << std::endl;
-        
-    MTA.calc_ranges();
-    MTA.calc_result();
-    // outputting the result of the attack
-    try
-    {
-        std::string result = MTA.get_result();
-        std::clog << "Main debug: final result \'" << result << "\"" << std::endl;
-    }
-    catch (const std::exception& e)
-    {
-        std::clog << "Main debug: algorithm failed, error " << e.what() << std::endl;
-    }
-    std::clog << "Main debug: running time " << lap(begin_time) << std::endl;
-}
-
-int main(int argc, char* argv[])
-{
-    if(argc > 1) debug();
-    else run(50);
     return 0;
 }

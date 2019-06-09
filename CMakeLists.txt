@@ -7,7 +7,7 @@ project(${PROJECT_NAME})
 include("${CMAKE_BINARY_DIR}/conanbuildinfo.cmake")
 conan_basic_setup(TARGETS NO_OUTPUT_DIRS)
 
-set(CMAKE_CXX_FLAGS "-g -Wall -std=c++14 -pthread")
+set(CMAKE_CXX_FLAGS "-g -Wall -std=c++17 -pthread")
 
 if (APPLE)
 	add_definitions(-DGTEST_USE_OWN_TR1_TUPLE)

@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <iostream>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -121,6 +122,9 @@ class matrix
     // throws std::invalid_argument if j is out of range
     // throws std::invalid_argument if v.size() is not v.rows()
     void set_column(int j, const vector<column, T>& v);
+
+    // returns the identity matrix of size n x n
+    static matrix<T> I(int n);
 };
 
 // read_JSON(std::istream &IS);        // Not implemented

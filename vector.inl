@@ -6,7 +6,7 @@ template <typename F>
 void vector<O, T>::map(const F& f)
 {
     for (int i = 0; i < size(); ++i)
-        self(i) = f(self(i));
+        f(self(i));
 }
 
 template <orientation O, typename T>
