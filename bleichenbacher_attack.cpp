@@ -18,7 +18,7 @@
 
 using AlgebraTAU::Fraction;
 using CryptoPP::Integer;
-const int max_message_count = 1<<16;
+const int max_message_count = 1<<20;
 typedef std::pair<Integer, Integer> II;
 
 template <typename T>
@@ -30,7 +30,7 @@ inline T div_ceil(const T& x, const T& y)
 class Server
 {
     //TODO change!
-    private:
+    public:
     CryptoPP::RSA::PrivateKey privateKey;
 
     public:
@@ -576,7 +576,6 @@ class AttackHandler
         Server srv(srv_is);
         Integer N, c, x;
         srv_is >> c;
-        CryptoPP::AutoSeededRandomPool prng;
         int k = number_of_blindings();
         N = srv.publicKey.GetModulus();
         std::vector<Integer> s(k),a(k);
@@ -599,9 +598,29 @@ class AttackHandler
         M(k, k) = N * (k - 1);
         M = M.transpose();
         
+        std::cout << "LLLing" << std::endl;
         //preforming the LLL reduction
-        AlgebraTAU::integral_LLL(M);
+        AlgebraTAU::vector<AlgebraTAU::orientation::row,Integer> R(k+1);
+        std::ifstream R_file("R0.txt");
+        for(int i = 0; i < k+1; ++i)
+            R_file >> R(i);
         
+        CryptoPP::ModularArithmetic ma(N);
+        x = ma.MultiplicativeInverse(s[2]);
+        Integer R0 = (R(2) / k) % N;
+        CryptoPP::AutoSeededRandomPool prng;
+        Integer m = srv.privateKey.CalculateInverse(prng, c);
+        Integer pred = ma.Multiply(R0-a[2],x);
+        std::cout << m << std::endl;
+        std::cout << pred << std::endl;
+
+
+        exit(1);
+        AlgebraTAU::integral_LLL(M);
+        /*
+
+
+
         //finding the shortest vector
         std::vector<Integer> norms(k+1);
         for(int i = 0; i < k+1; ++i) norms[i] = M.get_column(i).norm();
@@ -609,13 +628,15 @@ class AttackHandler
         for(int i = 0; i < k+1; ++i) sorted[i] = i;
         std::sort(sorted.begin(),sorted.end(),[&norms](int i , int j){ return norms[i] < norms[j]; });
         auto R = M.get_column(sorted[0]).transpose();
+        for(int i = 0; i < k+1; ++i)
+            std::cout << R(i) << std::endl;
 
         //Recovering the message
-        CryptoPP::ModularArithmetic ma(N);
         x = (R(0) / k) % N;
         Integer pred = ma.MultiplicativeInverse(s[0]);
         pred = ma.Multiply(pred,x);
-        return pkcs_decode(pred);
+        return pkcs_decode(pred);*/
+        return "";
     }
 
     void find_ranges()

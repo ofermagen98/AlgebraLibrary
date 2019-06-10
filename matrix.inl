@@ -263,6 +263,7 @@ void integral_LLL(matrix<T>& b)
     T u, tmp1, tmp2;
     while (k < n)
     {
+        std::cout << k << ":" << n << std::endl;
         // step 2
         if (k > kmax)
         {
