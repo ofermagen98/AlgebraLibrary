@@ -16,10 +16,8 @@
 
 using AlgebraTAU::Fraction;
 using CryptoPP::Integer;
-const int max_message_count = 1<<20;
+const int max_message_count = 560;
 typedef std::pair<Integer, Integer> II;
-
-Integer M;
 
 template <typename T>
 inline T div_ceil(const T& x, const T& y)
@@ -158,7 +156,7 @@ class Logger
 
 class Attacker
 {
-    std::string base_name;
+    const std::string base_name;
     // static id counter for all attackers
     static int id;
     // limitat number of messages each attacker can send
@@ -276,11 +274,6 @@ class Attacker
         return clog.debug(t);
     }
 };
-
-std::string pkcs_decode(const Integer& m){
-    return "";
-}
-
 int Attacker::id = 0;
 
 
@@ -326,14 +319,41 @@ int main(int argc, char const* argv[])
     const int keysize = 2048;
     Server srv(keysize);
     Integer c = srv.pkcs_encrypt("hello!");
-    CryptoPP::AutoSeededRandomPool prng;
-    M = srv.privateKey.CalculateInverse(prng, c);
-    Attacker attack(srv,c,4000);
-    attack.run();
-    std::cout << attack.get_message_counter() << std::endl;
-    M *= attack.get_blinding();
-    M %= srv.publicKey.GetModulus();
-    std::cout << (attack.get_range().first == M) << std::endl;
+    const Integer& N = srv.publicKey.GetModulus();
 
+    CryptoPP::AutoSeededRandomPool prng;
+    Integer m = srv.privateKey.CalculateInverse(prng, c);
+
+    int n = 8;
+    std::vector<Integer> s(n),a(n),b(n);
+    int bits_learned = 0;
+    for(int i = 0; i < n; ++i){
+        Attacker attack(srv,c);
+        try{
+            attack.run();
+        }catch(...){}
+
+        bits_learned += keysize - attack.size().BitCount() - 1;
+        a[i] = attack.get_range().first;
+        b[i] = attack.get_range().second;
+        s[i] = attack.get_blinding();
+    }
+
+    std::clog << "Learned: " << bits_learned << " bits of information" << std::endl;
+
+    AlgebraTAU::matrix<Integer> M(n+2,n+2,0);
+    for(int i = 0; i < n; ++i){
+        M(0,i) = s[i];
+        M(i+1,i) = N;
+        M(n+1,i) = a[i];
+        M(i,n+1) = 0;
+    }
+    M *= n;
+    M(n+1,n) = N * (n-1);
+    M = M.transpose();
+
+    std::cout << M(n-1,n) << std::endl;
+    AlgebraTAU::integral_LLL(M);
+    
     return 0;
 }

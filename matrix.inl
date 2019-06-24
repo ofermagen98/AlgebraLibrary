@@ -243,7 +243,7 @@ void invert(matrix<T>& M){
 }
 
 template <typename T>
-void integral_LLL(matrix<T>& b)
+void integral_LLL(matrix<T>& b, const T& fa = 3, const T& fb = 4)
 {
     using AlgebraTAU::abs;
     using std::abs;
@@ -253,7 +253,7 @@ void integral_LLL(matrix<T>& b)
     b = b.transpose();
     int n = b.rows();
     //matrix<T> H = matrix<T>::I(n);
-    matrix<T> lambda(n, n); // TODO! intialize lambda?
+    matrix<T> lambda(n, n); // TODO! should I intialize lambda?
 
     std::vector<T> dtmp(n + 1, 1);
     auto d = [&dtmp](int i) -> T& { return dtmp[i + 1]; };
@@ -280,8 +280,7 @@ void integral_LLL(matrix<T>& b)
     };
 
     auto SWAPI = [&](int k) {
-        for (int t = 0; t < n; ++t)
-        {
+        for (int t = 0; t < n; ++t){
             //std::swap(H(k, t), H(k - 1, t));
             std::swap(b(k, t), b(k - 1, t));
         }
@@ -291,7 +290,7 @@ void integral_LLL(matrix<T>& b)
 
         T L = lambda(k, k - 1);
         T B = (d(k - 2) * d(k) + L * L) / d(k - 1);
-        if(B == 0 || d(k) == 0) throw "wtf";
+        if(B == 0 || d(k) == 0) throw std::runtime_error("matrix do not form a basis");
         T t;
 
         for (int i = k + 1; i <= kmax; ++i)
@@ -300,14 +299,13 @@ void integral_LLL(matrix<T>& b)
             lambda(i, k) = (d(k) * lambda(i, k - 1) - L * t) / d(k - 1);
             lambda(i, k - 1) = (B * t + L * lambda(i, k)) / d(k);
         }
-
         d(k - 1) = B;
     };
 
-    T u, tmp1, tmp2;
+    T u;
     while (k < n)
     {
-        std::cout << k << ":" << n << std::endl;
+        std::cout << k << ":" << (n-1) << std::endl;
         // step 2
         if (k > kmax)
         {
@@ -326,23 +324,20 @@ void integral_LLL(matrix<T>& b)
                 else
                     d(k) = u;
             }
-            if (d(k) == 0) throw std::invalid_argument("matrix do not form a basis");
         }
 
         // step 3
         REDI(k, k - 1);
-        while (4 * d(k) * d(k - 2) + 4 * lambda(k, k - 1) * lambda(k, k - 1) < 3 * d(k - 1) * d(k - 1))
+        while (fb * d(k) * d(k - 2) + fb * lambda(k, k - 1) * lambda(k, k - 1) < fa * d(k - 1) * d(k - 1))
         {
             SWAPI(k);
             k = std::max(1, k - 1);
             REDI(k, k - 1);
         }
-
         for (int l = k - 2; l >= 0; --l)
             REDI(k, l);
         ++k;
     }
-
     b = b.transpose();
 }
 
