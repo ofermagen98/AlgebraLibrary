@@ -1,0 +1,4 @@
+/Users/ofermagen/Documents/AlgebraLibrary/build/CMakeFiles/rebuild_cache.dir
+/Users/ofermagen/Documents/AlgebraLibrary/build/CMakeFiles/edit_cache.dir
+/Users/ofermagen/Documents/AlgebraLibrary/build/CMakeFiles/test.dir
+/Users/ofermagen/Documents/AlgebraLibrary/build/CMakeFiles/runAttack.dir
