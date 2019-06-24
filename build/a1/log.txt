@@ -1,0 +1,8 @@
+Main debug (blinding): keysize=2048, attacker will be killed after 1048576 messages
+Blinding Attacker (1) debug: Beginning
+Blinding Attacker (2) debug: Beginning
+Blinding Attacker (3) debug: Beginning
+Blinding Attacker (4) debug: Beginning
+Blinding Attacker (4) debug: Found blinding value!
+Number of blindings found 1
+Blinding Attacker (5) debug: Beginning

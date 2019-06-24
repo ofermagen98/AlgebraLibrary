@@ -421,10 +421,6 @@ fstream
 -
 iostream
 -
-mutex
--
-thread
--
 vector
 -
 Fraction.h

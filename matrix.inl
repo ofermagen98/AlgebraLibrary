@@ -1,4 +1,6 @@
 #include "matrix.h"
+#define PRINTNL
+
 namespace AlgebraTAU
 {
 
@@ -199,6 +201,47 @@ matrix<T> matrix<T>::operator*(const T& a) const
     return res;
 }
 
+
+template<typename T>
+void invert(matrix<T>& M){
+    if(M.rows() != M.columns()) throw std::invalid_argument("matrice must be square");
+    if(M.det() == 0) throw std::invalid_argument("matrice is singular");
+    int n = M.rows();
+    matrix<T> N(n,2*n,0);
+
+    auto trans = [&N,n](int o){
+        for(int i = 0; i < n; ++i)
+            for(int j = 0; j < i; ++j)
+                std::swap(N(i,o+j),N(j,o+i));
+    };
+    auto revs = [&N,n](int o){
+        for(int i = 0; i < n; ++i)
+            for(int j = 0,k = n-1; j < k; ++j,--k)
+                std::swap(N(j,o+i),N(k,o+i));
+    };
+    auto rotate = [&trans,&revs](int o){
+        trans(o);
+        revs(o);
+        trans(o);
+        revs(o);
+    };
+    for(int i = 0; i < n; ++i){
+        N(i,n+i) = 1;
+        for(int j = 0; j < n; ++j)
+            N(i,j) = M(i,j);
+    }
+    gaussian_elimination(N);
+    rotate(0);
+    rotate(n);
+    gaussian_elimination(N);
+    rotate(0);
+    rotate(n);
+
+    for(int i = 0; i < n; ++i)
+        for(int j = 0; j < n; ++j)
+            M(i,j) = N(i,n+j) / N(i,i);
+}
+
 template <typename T>
 void integral_LLL(matrix<T>& b)
 {
@@ -248,6 +291,7 @@ void integral_LLL(matrix<T>& b)
 
         T L = lambda(k, k - 1);
         T B = (d(k - 2) * d(k) + L * L) / d(k - 1);
+        if(B == 0 || d(k) == 0) throw "wtf";
         T t;
 
         for (int i = k + 1; i <= kmax; ++i)
@@ -487,19 +531,13 @@ void gaussian_elimination(matrix<T>& m)
     {
         if (m(i, i) == 0)
         {
-            for (t = i + 1; t < m.rows() && m(t, i) == 0; ++t)
-                ;
-            if (t >= m.rows())
-            {
-                --i;
-                continue;
-            }
+            for (t = i + 1; t < m.rows() && m(t, i) == 0; ++t);
             if (t < m.rows())
             {
                 for (int j = 0; j < m.columns(); ++j)
                 {
                     swap(m(i, j), m(t, j));
-                    m(i, j) *= -1;
+                    m(i, j) = -m(i, j);
                 }
             }
             else
@@ -551,7 +589,9 @@ std::ostream& operator<<(std::ostream& out, const matrix<T>& m)
     using std::to_string;
 
     std::string res = "{";
-    // res.push_back('\n');
+    #ifdef PRINTNL 
+    res.push_back('\n');
+    #endif
     for (int i = 0; i < m.rows(); ++i)
     {
         res.push_back('{');
@@ -561,10 +601,14 @@ std::ostream& operator<<(std::ostream& out, const matrix<T>& m)
         res.pop_back();
         res.back() = '}';
         res.push_back(',');
-        // res.push_back('\n');
+        #ifdef PRINTNL 
+        res.push_back('\n');
+        #endif
     }
     res.pop_back();
-    // res.back() = '\n';
+    #ifdef PRINTNL 
+    res.back() = '\n';
+    #endif
     res.push_back('}');
     return out << res;
 }
